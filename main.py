@@ -3,14 +3,26 @@ from fastapi.responses import FileResponse
 from pymongo import MongoClient
 from bson import ObjectId
 import os
+from urllib.parse import quote
 import shutil
 from typing import List, Optional
 from datetime import datetime
 
 app = FastAPI()
 
+# username = quote_plus("vishaljain840")  # replace with actual username
+# password = "Archana@709"  # replace with actual password
+# encoded_password = quote(password)
 # MongoDB connection (ensure MongoDB is running)
-client = MongoClient("mongodb://localhost:27017")
+client = MongoClient(
+    "mongodb+srv://vishaljain840:1234@cluster0.bz0qc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+)
+
+# Correctly formatted connection string using f-string
+# connection_string = f"mongodb+srv://vishaljain840:<{password}>@cluster0.bz0qc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
+# # MongoDB connection
+# client = MongoClient(connection_string)
 db = client["payments_database"]  # Replace with your actual database name
 collection = db["payments"]
 
@@ -60,13 +72,17 @@ async def upload_evidence(payment_id: str, file: UploadFile = File(...)):
             status_code=400, detail="Invalid file type. Only PDF, PNG, JPG are allowed"
         )
 
-    # Save the file to disk or MongoDB
+    # Log file details
+    print(f"Uploading file: {file.filename} (size: {len(file.file.read())} bytes)")
+    file.file.seek(0)  # Reset file pointer after reading for logging
+
+    # Save the file to disk
     file_path = os.path.join(UPLOAD_FOLDER, file.filename)
     with open(file_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # Optionally: You can also store the file in MongoDB GridFS instead of the local filesystem.
-    # In this example, we're saving the file locally.
+    # Log the file path after saving
+    print(f"File saved to: {file_path}")
 
     # Save the file path (or file metadata) in MongoDB associated with the payment
     collection.update_one(
