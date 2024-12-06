@@ -7,9 +7,17 @@ from urllib.parse import quote
 import shutil
 from typing import List, Optional
 from datetime import datetime
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:4200"],  # Allow requests from localhost:4200
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
 # username = quote_plus("vishaljain840")  # replace with actual username
 # password = "Archana@709"  # replace with actual password
 # encoded_password = quote(password)
