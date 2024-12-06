@@ -18,36 +18,18 @@ app.add_middleware(
     allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
     allow_headers=["*"],  # Allow all headers
 )
-# username = quote_plus("vishaljain840")  # replace with actual username
-# password = "Archana@709"  # replace with actual password
-# encoded_password = quote(password)
-# MongoDB connection (ensure MongoDB is running)
+
+# MongoDB connection
 client = MongoClient(
     "mongodb+srv://vishaljain840:1234@cluster0.bz0qc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 )
-
-# Correctly formatted connection string using f-string
-# connection_string = f"mongodb+srv://vishaljain840:<{password}>@cluster0.bz0qc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-
-# # MongoDB connection
-# client = MongoClient(connection_string)
 db = client["payments_database"]  # Replace with your actual database name
-# collection = db["payments"]
 payments_collection = db.payments
 
-# Path to save files locally (optional, just for temporary use)
-# UPLOAD_FOLDER = "./uploads"
 
-# # Ensure upload folder exists
-# os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-
-# # Helper function to check file type (PDF, PNG, JPG)
-# def allowed_file(filename: str) -> bool:
-#     return filename.endswith((".pdf", ".png", ".jpg"))
-
-
+# Pydantic model to handle MongoDB ObjectId as string
 class Payment(BaseModel):
+    _id: Optional[str]  # ObjectId will be converted to str when serializing
     payee_first_name: str
     payee_last_name: str
     payee_payment_status: str
@@ -66,6 +48,12 @@ class Payment(BaseModel):
     tax_percent: float
     due_amount: float
     evidence_file_path: Optional[str] = None
+
+    class Config:
+        # Convert ObjectId to string automatically
+        json_encoders = {
+            ObjectId: str  # Convert ObjectId to string during serialization
+        }
 
 
 # Utility functions
@@ -86,7 +74,7 @@ def update_payment_status(payment: dict) -> str:
 
 
 # Endpoints
-@app.get("/get_payments")
+@app.get("/get_payments", response_model=List[Payment])
 async def get_payments(skip: int = 0, limit: int = 10, search: Optional[str] = None):
     filters = {}
     if search:
@@ -104,7 +92,7 @@ async def get_payments(skip: int = 0, limit: int = 10, search: Optional[str] = N
     for payment in payments:
         payment["total_due"] = calculate_total_due(payment)
         payment["payee_payment_status"] = update_payment_status(payment)
-        result.append(payment)
+        result.append(Payment(**payment))  # Convert MongoDB document to Pydantic model
 
     return result
 
