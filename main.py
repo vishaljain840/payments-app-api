@@ -1,13 +1,13 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile
+from pydantic import BaseModel
+from typing import List, Optional
 from pymongo import MongoClient
+from datetime import datetime
 from bson import ObjectId
 import os
-from urllib.parse import quote
 import shutil
-from typing import List, Optional
-from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
@@ -32,85 +32,152 @@ client = MongoClient(
 # # MongoDB connection
 # client = MongoClient(connection_string)
 db = client["payments_database"]  # Replace with your actual database name
-collection = db["payments"]
+# collection = db["payments"]
+payments_collection = db.payments
 
 # Path to save files locally (optional, just for temporary use)
-UPLOAD_FOLDER = "./uploads"
+# UPLOAD_FOLDER = "./uploads"
 
-# Ensure upload folder exists
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-
-# Helper function to check file type (PDF, PNG, JPG)
-def allowed_file(filename: str) -> bool:
-    return filename.endswith((".pdf", ".png", ".jpg"))
+# # Ensure upload folder exists
+# os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-@app.get("/")
-async def read_root():
-    return {"message": "Welcome to the Payments API"}
+# # Helper function to check file type (PDF, PNG, JPG)
+# def allowed_file(filename: str) -> bool:
+#     return filename.endswith((".pdf", ".png", ".jpg"))
 
 
-# Create payment route
+class Payment(BaseModel):
+    payee_first_name: str
+    payee_last_name: str
+    payee_payment_status: str
+    payee_added_date_utc: str
+    payee_due_date: str
+    payee_address_line_1: str
+    payee_address_line_2: Optional[str] = None
+    payee_city: str
+    payee_country: str
+    payee_province_or_state: str
+    payee_postal_code: str
+    payee_phone_number: str
+    payee_email: str
+    currency: str
+    discount_percent: float
+    tax_percent: float
+    due_amount: float
+    evidence_file_path: Optional[str] = None
+
+
+# Utility functions
+def calculate_total_due(payment: dict) -> float:
+    discount = payment["discount_percent"] / 100 * payment["due_amount"]
+    tax = payment["tax_percent"] / 100 * payment["due_amount"]
+    return payment["due_amount"] - discount + tax
+
+
+def update_payment_status(payment: dict) -> str:
+    due_date = datetime.strptime(payment["payee_due_date"], "%Y-%m-%dT%H:%M:%S")
+    today = datetime.utcnow()
+    if due_date.date() == today.date():
+        return "due_now"
+    elif due_date < today:
+        return "overdue"
+    return payment["payee_payment_status"]
+
+
+# Endpoints
+@app.get("/get_payments")
+async def get_payments(skip: int = 0, limit: int = 10, search: Optional[str] = None):
+    filters = {}
+    if search:
+        filters = {
+            "$or": [
+                {"payee_first_name": {"$regex": search, "$options": "i"}},
+                {"payee_last_name": {"$regex": search, "$options": "i"}},
+                {"payee_email": {"$regex": search, "$options": "i"}},
+            ]
+        }
+
+    payments = payments_collection.find(filters).skip(skip).limit(limit)
+    result = []
+
+    for payment in payments:
+        payment["total_due"] = calculate_total_due(payment)
+        payment["payee_payment_status"] = update_payment_status(payment)
+        result.append(payment)
+
+    return result
+
+
+@app.post("/update_payment/{payment_id}")
+async def update_payment(payment_id: str, payment: Payment):
+    result = payments_collection.update_one(
+        {"_id": ObjectId(payment_id)}, {"$set": payment.dict(exclude_unset=True)}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    return {"message": "Payment updated successfully"}
+
+
+@app.delete("/delete_payment/{payment_id}")
+async def delete_payment(payment_id: str):
+    result = payments_collection.delete_one({"_id": ObjectId(payment_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    return {"message": "Payment deleted successfully"}
+
+
 @app.post("/create_payment")
-async def create_payment(payment_data: dict):
-    # Logic for creating payments (store them in MongoDB)
-    payment_id = collection.insert_one(payment_data).inserted_id
-    return {"payment_id": str(payment_id)}
+async def create_payment(payment: Payment):
+    payment_dict = payment.dict()
+    payment_dict["payee_added_date_utc"] = datetime.utcnow().isoformat()
+    payment_dict["payee_payment_status"] = update_payment_status(payment_dict)
+    result = payments_collection.insert_one(payment_dict)
+    return {"payment_id": str(result.inserted_id)}
 
 
-# Upload evidence file when payment status is updated to completed
 @app.post("/upload_evidence/{payment_id}")
 async def upload_evidence(payment_id: str, file: UploadFile = File(...)):
-    # Check if the payment exists in the database
-    payment = collection.find_one({"_id": ObjectId(payment_id)})
-    if not payment:
+    file_extension = file.filename.split(".")[-1].lower()
+    if file_extension not in ["pdf", "png", "jpg"]:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
+    file_path = f"./uploads/{payment_id}_{file.filename}"
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    result = payments_collection.update_one(
+        {"_id": ObjectId(payment_id)},
+        {
+            "$set": {
+                "evidence_file_path": file_path,
+                "payee_payment_status": "completed",
+            }
+        },
+    )
+    if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    # Ensure the payment status is 'completed'
-    if payment["payee_payment_status"] != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail="Payment must be marked as completed to upload evidence",
-        )
-
-    # Ensure the file type is valid
-    if not allowed_file(file.filename):
-        raise HTTPException(
-            status_code=400, detail="Invalid file type. Only PDF, PNG, JPG are allowed"
-        )
-
-    # Log file details
-    print(f"Uploading file: {file.filename} (size: {len(file.file.read())} bytes)")
-    file.file.seek(0)  # Reset file pointer after reading for logging
-
-    # Save the file to disk
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    # Log the file path after saving
-    print(f"File saved to: {file_path}")
-
-    # Save the file path (or file metadata) in MongoDB associated with the payment
-    collection.update_one(
-        {"_id": ObjectId(payment_id)}, {"$set": {"evidence_file_path": file_path}}
-    )
-
-    return {"message": "Evidence file uploaded successfully", "file_path": file_path}
+    return {"message": "Evidence uploaded successfully"}
 
 
-# Provide the download link for the uploaded evidence file
 @app.get("/download_evidence/{payment_id}")
 async def download_evidence(payment_id: str):
-    # Retrieve the payment and file path from MongoDB
-    payment = collection.find_one({"_id": ObjectId(payment_id)})
-    if not payment or "evidence_file_path" not in payment:
-        raise HTTPException(status_code=404, detail="Evidence file not found")
+    payment = payments_collection.find_one({"_id": ObjectId(payment_id)})
+    if not payment or not payment.get("evidence_file_path"):
+        raise HTTPException(status_code=404, detail="Evidence not found")
 
-    # Return the file to be downloaded
     file_path = payment["evidence_file_path"]
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Evidence file not found on server")
+        raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(file_path)
+
+
+# Run the application
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
